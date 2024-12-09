@@ -5,6 +5,7 @@ import { onAbort } from '../../common/abortController'
 import { CompletionStopReason } from '../../inferenceClient/misc'
 import type { CompletionResponse } from '../../sourcegraph-api/completions/types'
 import { constructGeminiChatMessages } from './utils'
+import { fetch, ProxyAgent } from 'undici'
 
 /**
  * The URL for the Gemini API, which is used to interact with the Generative Language API provided by Google.
@@ -53,6 +54,7 @@ export async function googleChatClient({
         headers: {
             'Content-Type': 'application/json',
         },
+        dispatcher: new ProxyAgent({ uri: new URL(process.env.https_proxy!).toString() }), 
         signal,
     })
         .then(async response => {
