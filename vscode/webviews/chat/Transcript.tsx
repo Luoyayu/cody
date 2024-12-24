@@ -3,6 +3,7 @@ import {
     ContextItemSource,
     type Guardrails,
     type Model,
+    type NLSSearchDynamicFilter,
     REMOTE_FILE_PROVIDER_URI,
     type SerializedPromptEditorValue,
     deserializeContextItem,
@@ -17,7 +18,6 @@ import {
 import { clsx } from 'clsx'
 import { isEqual } from 'lodash'
 import debounce from 'lodash/debounce'
-import { Search } from 'lucide-react'
 import {
     type FC,
     type MutableRefObject,
@@ -32,11 +32,10 @@ import {
 import { URI } from 'vscode-uri'
 import type { UserAccountInfo } from '../Chat'
 import type { ApiPostMessage } from '../Chat'
-import { Button } from '../components/shadcn/ui/button'
 import { getVSCodeAPI } from '../utils/VSCodeApi'
 import { SpanManager } from '../utils/spanManager'
 import { getTraceparentFromSpanContext, useTelemetryRecorder } from '../utils/telemetry'
-import { useExperimentalOneBox, useExperimentalOneBoxDebug } from '../utils/useExperimentalOneBox'
+import { useExperimentalOneBox } from '../utils/useExperimentalOneBox'
 import type { CodeBlockActionsProps } from './ChatMessageContent/ChatMessageContent'
 import {
     ContextCell,
@@ -48,10 +47,12 @@ import {
     makeHumanMessageInfo,
 } from './cells/messageCell/assistant/AssistantMessageCell'
 import { HumanMessageCell } from './cells/messageCell/human/HumanMessageCell'
-import { CodyIcon } from './components/CodyIcon'
-import { InfoMessage } from './components/InfoMessage'
 
 import { type Context, type Span, context, trace } from '@opentelemetry/api'
+import { TELEMETRY_INTENT } from '../../src/telemetry/onebox'
+import { SwitchIntent } from './cells/messageCell/assistant/SwitchIntent'
+import { LastEditorContext } from './context'
+
 interface TranscriptProps {
     activeChatContext?: Context
     setActiveChatContext: (context: Context | undefined) => void
@@ -134,34 +135,36 @@ export const Transcript: FC<TranscriptProps> = props => {
                 'tw-flex-grow': transcript.length > 0,
             })}
         >
-            {interactions.map((interaction, i) => (
-                <TranscriptInteraction
-                    key={interaction.humanMessage.index}
-                    activeChatContext={activeChatContext}
-                    setActiveChatContext={setActiveChatContext}
-                    models={models}
-                    chatEnabled={chatEnabled}
-                    userInfo={userInfo}
-                    interaction={interaction}
-                    guardrails={guardrails}
-                    postMessage={postMessage}
-                    feedbackButtonsOnSubmit={feedbackButtonsOnSubmit}
-                    copyButtonOnSubmit={copyButtonOnSubmit}
-                    insertButtonOnSubmit={insertButtonOnSubmit}
-                    isFirstInteraction={i === 0}
-                    isLastInteraction={i === interactions.length - 1}
-                    isLastSentInteraction={
-                        i === interactions.length - 2 && interaction.assistantMessage !== null
-                    }
-                    priorAssistantMessageIsLoading={Boolean(
-                        messageInProgress && interactions.at(i - 1)?.assistantMessage?.isLoading
-                    )}
-                    smartApply={smartApply}
-                    smartApplyEnabled={smartApplyEnabled}
-                    editorRef={i === interactions.length - 1 ? lastHumanEditorRef : undefined}
-                    onAddToFollowupChat={onAddToFollowupChat}
-                />
-            ))}
+            <LastEditorContext.Provider value={lastHumanEditorRef}>
+                {interactions.map((interaction, i) => (
+                    <TranscriptInteraction
+                        key={interaction.humanMessage.index}
+                        activeChatContext={activeChatContext}
+                        setActiveChatContext={setActiveChatContext}
+                        models={models}
+                        chatEnabled={chatEnabled}
+                        userInfo={userInfo}
+                        interaction={interaction}
+                        guardrails={guardrails}
+                        postMessage={postMessage}
+                        feedbackButtonsOnSubmit={feedbackButtonsOnSubmit}
+                        copyButtonOnSubmit={copyButtonOnSubmit}
+                        insertButtonOnSubmit={insertButtonOnSubmit}
+                        isFirstInteraction={i === 0}
+                        isLastInteraction={i === interactions.length - 1}
+                        isLastSentInteraction={
+                            i === interactions.length - 2 && interaction.assistantMessage !== null
+                        }
+                        priorAssistantMessageIsLoading={Boolean(
+                            messageInProgress && interactions.at(i - 1)?.assistantMessage?.isLoading
+                        )}
+                        smartApply={smartApply}
+                        smartApplyEnabled={smartApplyEnabled}
+                        editorRef={i === interactions.length - 1 ? lastHumanEditorRef : undefined}
+                        onAddToFollowupChat={onAddToFollowupChat}
+                    />
+                ))}
+            </LastEditorContext.Provider>
         </div>
     )
 }
@@ -171,7 +174,7 @@ export interface Interaction {
     /** The human message, either sent or not. */
     humanMessage: ChatMessage & { index: number; isUnsentFollowup: boolean }
 
-    /** `null` if the {@link Interaction.humanMessage} has not yet been sent. */
+    /** `null` if the {@link Interaction["humanMessage"]} has not yet been sent. */
     assistantMessage: (ChatMessage & { index: number; isLoading: boolean }) | null
 }
 
@@ -339,7 +342,6 @@ const TranscriptInteraction: FC<TranscriptInteractionProps> = memo(props => {
 
     const extensionAPI = useExtensionAPI()
     const experimentalOneBoxEnabled = useExperimentalOneBox()
-    const experimentalOneBoxDebug = useExperimentalOneBoxDebug()
     const onChange = useMemo(() => {
         return debounce(async (editorValue: SerializedPromptEditorValue) => {
             if (!experimentalOneBoxEnabled) {
@@ -380,8 +382,11 @@ const TranscriptInteraction: FC<TranscriptInteractionProps> = memo(props => {
         })
     }, [])
 
+    const isSearchIntent = experimentalOneBoxEnabled && humanMessage.intent === 'search'
+
     const isContextLoading = Boolean(
-        humanMessage.contextFiles === undefined &&
+        !isSearchIntent &&
+            humanMessage.contextFiles === undefined &&
             isLastSentInteraction &&
             assistantMessage?.text === undefined
     )
@@ -510,13 +515,17 @@ const TranscriptInteraction: FC<TranscriptInteractionProps> = memo(props => {
                 onEditSubmit(intent)
                 telemetryRecorder.recordEvent('onebox.intentCorrection', 'clicked', {
                     metadata: {
-                        recordsPrivateMetadataTranscript: 1,
+                        initialIntent:
+                            humanMessage.intent === 'search'
+                                ? TELEMETRY_INTENT.SEARCH
+                                : TELEMETRY_INTENT.CHAT,
+                        selectedIntent:
+                            intent === 'search' ? TELEMETRY_INTENT.SEARCH : TELEMETRY_INTENT.CHAT,
                     },
                     privateMetadata: {
-                        initialIntent: humanMessage.intent,
-                        userSpecifiedIntent: intent,
-                        promptText: editorState.text,
+                        query: editorState.text,
                     },
+                    billingMetadata: { product: 'cody', category: 'billable' },
                 })
             }
         },
@@ -558,6 +567,26 @@ const TranscriptInteraction: FC<TranscriptInteractionProps> = memo(props => {
         ?.getSerializedValue()
         .contextItems.some(item => item.type === 'repository')
 
+    const onHumanMessageSubmit = useCallback(
+        (intent?: ChatMessage['intent']) => {
+            if (humanMessage.isUnsentFollowup) {
+                return onFollowupSubmit(intent)
+            }
+            onEditSubmit(intent)
+        },
+        [humanMessage.isUnsentFollowup, onFollowupSubmit, onEditSubmit]
+    )
+
+    const onSelectedFiltersUpdate = useCallback(
+        (selectedFilters: NLSSearchDynamicFilter[]) => {
+            reevaluateSearchWithSelectedFilters({
+                messageIndexInTranscript: humanMessage.index,
+                selectedFilters,
+            })
+        },
+        [humanMessage.index]
+    )
+
     return (
         <>
             <HumanMessageCell
@@ -570,9 +599,7 @@ const TranscriptInteraction: FC<TranscriptInteractionProps> = memo(props => {
                 isSent={!humanMessage.isUnsentFollowup}
                 isPendingPriorResponse={priorAssistantMessageIsLoading}
                 onChange={onChange}
-                onSubmit={
-                    humanMessage.isUnsentFollowup ? () => onFollowupSubmit() : () => onEditSubmit()
-                }
+                onSubmit={onHumanMessageSubmit}
                 onStop={onStop}
                 isFirstInteraction={isFirstInteraction}
                 isLastInteraction={isLastInteraction}
@@ -581,44 +608,22 @@ const TranscriptInteraction: FC<TranscriptInteractionProps> = memo(props => {
                 className={!isFirstInteraction && isLastInteraction ? 'tw-mt-auto' : ''}
                 onEditorFocusChange={resetIntent}
             />
-
-            {experimentalOneBoxEnabled && experimentalOneBoxDebug && humanMessage.intent && (
-                <InfoMessage>
-                    {humanMessage.intent === 'search' ? (
-                        <div className="tw-flex tw-justify-between tw-gap-4 tw-items-center">
-                            <span>Intent detection selected a code search response.</span>
-                            <div className="tw-shrink-0 tw-self-start">
-                                <Button
-                                    size="sm"
-                                    variant="outline"
-                                    className="tw-text-prmary tw-flex tw-gap-2 tw-items-center"
-                                    onClick={reSubmitWithChatIntent}
-                                >
-                                    <CodyIcon className="tw-text-link" />
-                                    Ask the LLM
-                                </Button>
-                            </div>
-                        </div>
-                    ) : (
-                        <div className="tw-flex tw-justify-between tw-gap-4 tw-items-center">
-                            <span>Intent detection selected an LLM response.</span>
-                            <div className="tw-shrink-0 tw-self-start">
-                                <Button
-                                    size="sm"
-                                    variant="outline"
-                                    className="tw-text-prmary tw-flex tw-gap-2 tw-items-center"
-                                    onClick={reSubmitWithSearchIntent}
-                                >
-                                    <Search className="tw-size-8 tw-text-link" />
-                                    Search Code
-                                </Button>
-                            </div>
-                        </div>
-                    )}
-                </InfoMessage>
+            {experimentalOneBoxEnabled && (
+                <SwitchIntent
+                    intent={humanMessage?.intent}
+                    manuallySelected={!!humanMessage.manuallySelectedIntent}
+                    onSwitch={
+                        humanMessage?.intent === 'search'
+                            ? reSubmitWithChatIntent
+                            : reSubmitWithSearchIntent
+                    }
+                />
             )}
-            {(humanMessage.contextFiles || assistantMessage || isContextLoading) && (
+
+            {(humanMessage.contextFiles || assistantMessage || isContextLoading) && !isSearchIntent && (
                 <ContextCell
+                    experimentalOneBoxEnabled={experimentalOneBoxEnabled}
+                    intent={humanMessage.intent}
                     resubmitWithRepoContext={
                         corpusContextItems.length > 0 && !mentionsContainRepository && assistantMessage
                             ? resubmitWithRepoContext
@@ -657,6 +662,8 @@ const TranscriptInteraction: FC<TranscriptInteractionProps> = memo(props => {
                     }
                     smartApply={smartApply}
                     smartApplyEnabled={smartApplyEnabled}
+                    onSelectedFiltersUpdate={onSelectedFiltersUpdate}
+                    isLastSentInteraction={isLastSentInteraction}
                 />
             )}
         </>
@@ -732,4 +739,18 @@ function submitHumanMessage({
         traceparent,
     })
     focusLastHumanMessageEditor()
+}
+
+function reevaluateSearchWithSelectedFilters({
+    messageIndexInTranscript,
+    selectedFilters,
+}: {
+    messageIndexInTranscript: number
+    selectedFilters: NLSSearchDynamicFilter[]
+}): void {
+    getVSCodeAPI().postMessage({
+        command: 'reevaluateSearchWithSelectedFilters',
+        index: messageIndexInTranscript,
+        selectedFilters,
+    })
 }

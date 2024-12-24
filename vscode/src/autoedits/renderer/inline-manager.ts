@@ -1,12 +1,11 @@
 import * as vscode from 'vscode'
 
-import type { DocumentContext } from '@sourcegraph/cody-shared'
+import { type DocumentContext, isFileURI } from '@sourcegraph/cody-shared'
 
 import { completionMatchesSuffix } from '../../completions/is-completion-visible'
 import { getNewLineChar } from '../../completions/text-processing'
 import { autoeditsLogger } from '../logger'
-import type { CodeToReplaceData } from '../prompt-utils'
-import { adjustPredictionIfInlineCompletionPossible } from '../utils'
+import type { CodeToReplaceData } from '../prompt/prompt-utils'
 
 import type {
     AddedLineInfo,
@@ -27,8 +26,35 @@ export class AutoEditsInlineRendererManager
     extends AutoEditsDefaultRendererManager
     implements AutoEditsRendererManager
 {
+    protected async acceptEdit(): Promise<void> {
+        const editor = vscode.window.activeTextEditor
+        if (!this.activeEdit || !editor || editor.document.uri.toString() !== this.activeEdit.uri) {
+            await this.dismissEdit()
+            return
+        }
+
+        await vscode.commands.executeCommand('editor.action.inlineSuggest.hide')
+        await editor.edit(editBuilder => {
+            editBuilder.replace(this.activeEdit!.range, this.activeEdit!.prediction)
+        })
+
+        await this.dismissEdit()
+    }
+
+    protected async onDidChangeTextEditorSelection(
+        event: vscode.TextEditorSelectionChangeEvent
+    ): Promise<void> {
+        // If the cursor moved in any file, we assume it's a user action and
+        // dismiss the active edit. This is because parts of the edit might be
+        // rendered as inline completion ghost text, which is hidden by default
+        // whenever the cursor moves.
+        if (isFileURI(event.textEditor.document.uri)) {
+            this.dismissEdit()
+        }
+    }
+
     async maybeRenderDecorationsAndTryMakeInlineCompletionResponse(
-        originalPrediction: string,
+        prediction: string,
         codeToReplaceData: CodeToReplaceData,
         document: vscode.TextDocument,
         position: vscode.Position,
@@ -38,28 +64,19 @@ export class AutoEditsInlineRendererManager
         inlineCompletions: vscode.InlineCompletionItem[] | null
         updatedDecorationInfo: DecorationInfo
     }> {
-        const prediction = adjustPredictionIfInlineCompletionPossible(
-            originalPrediction,
-            codeToReplaceData.codeToRewritePrefix,
-            codeToReplaceData.codeToRewriteSuffix
-        )
-
-        const completionTextAfterCursor = getCompletionText({
-            prediction: originalPrediction,
+        const { insertText, usedChangeIds } = getCompletionText({
+            prediction,
             cursorPosition: position,
             decorationInfo,
         })
 
         // The current line suffix should not require any char removals to render the completion.
-        const isSuffixMatch = completionMatchesSuffix(
-            { insertText: completionTextAfterCursor },
-            docContext.currentLineSuffix
-        )
+        const isSuffixMatch = completionMatchesSuffix({ insertText }, docContext.currentLineSuffix)
 
         let inlineCompletions: vscode.InlineCompletionItem[] | null = null
 
         if (isSuffixMatch) {
-            const completionText = docContext.currentLinePrefix + completionTextAfterCursor
+            const completionText = docContext.currentLinePrefix + insertText
 
             inlineCompletions = [
                 new vscode.InlineCompletionItem(
@@ -74,11 +91,26 @@ export class AutoEditsInlineRendererManager
             autoeditsLogger.logDebug('Autocomplete Inline Response: ', completionText)
         }
 
+        function withoutUsedChanges<T extends { id: string }>(array: T[]): T[] {
+            return array.filter(item => !usedChangeIds.has(item.id))
+        }
+
+        // Filter out changes that were used to render the inline completion.
+        const decorationInfoWithoutUsedChanges = {
+            addedLines: withoutUsedChanges(decorationInfo.addedLines),
+            removedLines: withoutUsedChanges(decorationInfo.removedLines),
+            modifiedLines: withoutUsedChanges(decorationInfo.modifiedLines).map(c => ({
+                ...c,
+                changes: withoutUsedChanges(c.changes),
+            })),
+            unchangedLines: withoutUsedChanges(decorationInfo.unchangedLines),
+        }
+
         await this.showEdit({
             document,
             range: codeToReplaceData.range,
             prediction,
-            decorationInfo,
+            decorationInfo: decorationInfoWithoutUsedChanges,
         })
 
         return { inlineCompletions, updatedDecorationInfo: decorationInfo }
@@ -127,7 +159,15 @@ export function getCompletionText({
     prediction,
     cursorPosition,
     decorationInfo,
-}: { prediction: string; cursorPosition: vscode.Position; decorationInfo: DecorationInfo }): string {
+}: {
+    prediction: string
+    cursorPosition: vscode.Position
+    decorationInfo: DecorationInfo
+}): {
+    insertText: string
+    usedChangeIds: Set<string>
+} {
+    const usedChangeIds = new Set<string>()
     const candidates = [...decorationInfo.modifiedLines, ...decorationInfo.addedLines]
 
     let currentLine = cursorPosition.line
@@ -154,10 +194,9 @@ export function getCompletionText({
         }
 
         if (candidate.type === 'added') {
-            // TODO(valery): avoid modifying array items in place, make side-effects obvious to the caller.
-            // Mark this added line as rendered as a part of the inline completion item
+            // Collect candidate IDs rendered as a part of the inline completion item
             // so that we don't decorate it with line decorations later.
-            candidate.usedAsInlineCompletion = true
+            usedChangeIds.add(candidate.id)
             candidateText = candidate.text
         }
 
@@ -175,19 +214,23 @@ export function getCompletionText({
             // To do that we extract all the inserted text after the cursor position.
             if (candidate.type === 'modified') {
                 candidateText = candidate.changes
-                    .filter(lineChange => lineChange.range.end.character >= cursorPosition.character)
-                    .sort((a, b) => a.range.start.compareTo(b.range.start))
+                    .filter(
+                        lineChange => lineChange.originalRange.end.character >= cursorPosition.character
+                    )
+                    .sort((a, b) => a.originalRange.start.compareTo(b.originalRange.start))
                     .reduce((lineChangeText, lineChange) => {
                         // If a line change starts before the cursor position, cut if off from this point.
                         const textAfterCursor = lineChange.text.slice(
-                            Math.max(cursorPosition.character - lineChange.range.start.character, 0)
+                            Math.max(
+                                cursorPosition.character - lineChange.originalRange.start.character,
+                                0
+                            )
                         )
 
                         if (textAfterCursor.length && lineChange.type === 'insert') {
-                            // TODO(valery): avoid modifying array items in place, make side-effects obvious to the caller.
-                            // Mark this line change as rendered as a part of the inline completion item
+                            // Collect this line change IDs rendered as a part of the inline completion item
                             // so that we don't decorate it with line decorations later.
-                            lineChange.usedAsInlineCompletion = true
+                            usedChangeIds.add(lineChange.id)
                         }
 
                         lineChangeText += textAfterCursor
@@ -206,7 +249,9 @@ export function getCompletionText({
             candidate.changes.every(c => c.type === 'insert')
         ) {
             for (const change of candidate.changes) {
-                change.usedAsInlineCompletion = true
+                // Collect this line change IDs rendered as a part of the inline completion item
+                // so that we don't decorate it with line decorations later.
+                usedChangeIds.add(change.id)
             }
 
             candidateText = candidate.newText
@@ -223,5 +268,8 @@ export function getCompletionText({
         break
     }
 
-    return lines.join(getNewLineChar(prediction))
+    return {
+        insertText: lines.join(getNewLineChar(prediction)),
+        usedChangeIds,
+    }
 }

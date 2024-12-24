@@ -35,7 +35,7 @@ interface HumanMessageCellProps {
 
     onEditorFocusChange?: (focused: boolean) => void
     onChange?: (editorState: SerializedPromptEditorValue) => void
-    onSubmit: (editorState: SerializedPromptEditorValue, intent?: ChatMessage['intent']) => void
+    onSubmit: (intent?: ChatMessage['intent']) => void
     onStop: () => void
 
     isFirstInteraction?: boolean
@@ -64,7 +64,7 @@ export const HumanMessageCell: FC<HumanMessageCellProps> = ({ message, ...otherP
         <HumanMessageCellContent
             {...otherProps}
             initialEditorState={initialEditorState}
-            intent={message.intent}
+            intent={message.manuallySelectedIntent}
         />
     )
 }

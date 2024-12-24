@@ -4,9 +4,11 @@ import type {
     ChatMessage,
     ClientCapabilitiesWithLegacyFields,
     ClientConfiguration,
+    CodyClientConfig,
     CodyIDE,
     ContextItem,
     ContextItemSource,
+    NLSSearchDynamicFilter,
     PromptMode,
     RangeData,
     RequestMessage,
@@ -139,6 +141,11 @@ export type WebviewMessage =
           filterLabel: string
           message: string
       }
+    | {
+          command: 'reevaluateSearchWithSelectedFilters'
+          index: number
+          selectedFilters: NLSSearchDynamicFilter[]
+      }
 
 export interface SmartApplyResult {
     taskId: FixupTaskID
@@ -155,13 +162,12 @@ export type ExtensionMessage =
           clientCapabilities: ClientCapabilitiesWithLegacyFields
           authStatus: AuthStatus
           userProductSubscription?: UserProductSubscription | null | undefined
-          configFeatures: {
-              chat: boolean
-              attribution: boolean
-              serverSentModels: boolean
-          }
           isDotComUser: boolean
           workspaceFolderUris: string[]
+      }
+    | {
+          type: 'clientConfig'
+          clientConfig?: CodyClientConfig | null | undefined
       }
     | {
           /** Used by JetBrains and not VS Code. */
@@ -270,6 +276,9 @@ export const ACCOUNT_LIMITS_INFO_URL = new URL(
 )
 // TODO: Update this URL to the correct one when the Cody model waitlist is available
 export const CODY_BLOG_URL_o1_WAITLIST = new URL('https://sourcegraph.com/blog/openai-o1-for-cody')
+
+// TODO: Update to live link https://linear.app/sourcegraph/issue/CORE-535/cody-clients-migrate-ctas-to-live-links
+export const DOTCOM_WORKSPACE_LEARN_MORE_URL = new URL('https://sourcegraph.com/docs')
 
 /** The local environment of the editor. */
 export interface LocalEnv {
