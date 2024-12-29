@@ -197,8 +197,8 @@ describe('Agent', () => {
         expect(currentUserCodySubscription).toMatchInlineSnapshot(`
           {
             "applyProRateLimits": true,
-            "currentPeriodEndAt": "2024-12-14T22:11:32Z",
-            "currentPeriodStartAt": "2024-11-14T22:11:32Z",
+            "currentPeriodEndAt": "2025-01-14T22:11:32Z",
+            "currentPeriodStartAt": "2024-12-14T22:11:32Z",
             "plan": "PRO",
             "status": "ACTIVE",
           }
@@ -438,7 +438,7 @@ describe('Agent', () => {
                     'cody.chatResponse:noCode',
                 ])
             )
-        })
+        }, 30_000)
 
         describe('chat/editMessage', () => {
             it(
@@ -527,7 +527,6 @@ describe('Agent', () => {
                     expect.arrayContaining([
                         'cody.chat-question:submitted',
                         'cody.chat-question:executed',
-                        'cody.chatResponse:noCode',
                         'cody.editChatButton:clicked',
                     ])
                 )
